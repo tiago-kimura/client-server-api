@@ -45,13 +45,13 @@ The requirements to fulfill this challenge are:
 ### Running the server
 
 Inside the "server" folder, type in the terminal:
-
+```go
 `go run server.go`
 
 ### Running the client
 
 Inside the "client" folder, type in the terminal:
-
+```go
 `go run client.go`
 
 ### Request from client.go

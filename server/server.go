@@ -8,7 +8,8 @@ import (
 	"log"
 	"net/http"
 	"time"
-	//_ "github.com/mattn/go-sqlite3"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 type ExchangeRate struct {
@@ -16,6 +17,7 @@ type ExchangeRate struct {
 }
 
 type USDBRL struct {
+	Id         string `json:"id"`
 	Code       string `json:"code"`
 	Codein     string `json:"codein"`
 	Name       string `json:"name"`
@@ -33,29 +35,65 @@ type Response struct {
 	Bid string `json:"bid"`
 }
 
-//TODO: Ainda não está funcionando o timeout e precisa arrumar o banco. Além de fazer o lado do client
-
-func writeResponse(w http.ResponseWriter, statusCode int, body []byte) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(statusCode)
-	w.Write(body)
+func NewDatabase() {
+	db, err := sql.Open("sqlite3", "./currencies.db")
+	if err != nil {
+		log.Fatalf("Erro ao abrir banco de dados: %v\n", err)
+	}
+	defer db.Close()
+	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS exchange_rates (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		code TEXT,
+		codein TEXT,
+		name TEXT,
+		high TEXT,
+		low TEXT,
+		varBid TEXT,
+		pctChange TEXT,
+		bid TEXT,
+		ask TEXT,
+		timestamp TEXT,
+		create_date TEXT
+	);`)
+	if err != nil {
+		log.Fatalf("Erro ao criar tabela: %v\n", err)
+	}
 }
 
-var database *sql.DB
-
-// func NewDatabase() {
-// 	dbPath := "sqlite3://user:password@tcp(localhost:3306)/data/exchange_rates.db"
-// 	var err error
-// 	database, err = sql.Open("sqlite3", dbPath)
-// 	if err != nil {
-// 		log.Panic("Error connecting to database:", err)
-// 	}
-// }
-
 func main() {
-	//	NewDatabase()
-	http.HandleFunc("/dollarExchangeRate", handler)
-	http.ListenAndServe(":8080", nil)
+	NewDatabase()
+	http.HandleFunc("/cotacao", handler)
+	http.HandleFunc("/cotacoes", handlerGet)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
+func handlerGet(w http.ResponseWriter, r *http.Request) {
+	db, err := sql.Open("sqlite3", "./currencies.db")
+	if err != nil {
+		log.Fatalf("Erro ao abrir banco de dados: %v\n", err)
+	}
+	defer db.Close()
+	rows, err := db.Query("SELECT * FROM exchange_rates ")
+	if err != nil {
+		log.Fatalf("Erro ao executar a consulta SQL: %v\n", err)
+	}
+	defer rows.Close()
+
+	var rates []ExchangeRate
+	for rows.Next() {
+		var rate ExchangeRate
+		err := rows.Scan(&rate.USDBRL.Id, &rate.USDBRL.Code, &rate.USDBRL.Codein, &rate.USDBRL.Name, &rate.USDBRL.High, &rate.USDBRL.Low,
+			&rate.USDBRL.VarBid, &rate.USDBRL.PctChange, &rate.USDBRL.Bid, &rate.USDBRL.Ask, &rate.USDBRL.Timestamp, &rate.USDBRL.CreateDate)
+		if err != nil {
+			log.Fatalf("Erro ao ler linha do resultado: %v\n", err)
+		}
+		rates = append(rates, rate)
+	}
+	if err = rows.Err(); err != nil {
+		log.Fatalf("Erro ao iterar sobre as linhas do resultado: %v\n", err)
+	}
+	body, _ := json.Marshal(rates)
+	writeResponse(w, http.StatusOK, body)
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
@@ -68,20 +106,17 @@ func handler(w http.ResponseWriter, r *http.Request) {
 		log.Println("Request cancelada pelo cliente")
 	case <-time.After(1 * time.Second):
 
-		ctxEx, cancelEx := context.WithTimeout(ctx, 200*time.Millisecond)
-		defer cancelEx()
-		exchange, err := fetchExchangeRate(ctxEx, "USD-BRL")
+		exchange, err := fetchExchangeRate(ctx, "USD-BRL")
 		if err != nil {
 			writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
+			return
 		}
 
-		// ctxDB, cancelDB := context.WithTimeout(context.Background(), 20*time.Millisecond)
-		// defer cancelDB()
-		// err = saveExchangeRate(ctxDB, database, exchange)
-		// if err != nil {
-		// 	writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
-		// 	return
-		// }
+		err = saveExchangeRate(ctx, exchange)
+		if err != nil {
+			writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
+			return
+		}
 
 		var response Response
 		response.Bid = exchange.USDBRL.Bid
@@ -90,16 +125,28 @@ func handler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func fetchExchangeRate(_ context.Context, typeConvertion string) (ExchangeRate, error) {
+func fetchExchangeRate(ctx context.Context, typeConversion string) (ExchangeRate, error) {
 	var exchange ExchangeRate
-	req, err := http.Get("https://economia.awesomeapi.com.br/json/last/" + typeConvertion)
+	client := http.Client{}
+	req, err := http.NewRequest("GET", "https://economia.awesomeapi.com.br/json/last/"+typeConversion, nil)
 	if err != nil {
 		log.Println(err.Error())
 		return exchange, err
 	}
-	defer req.Body.Close()
 
-	body, err := io.ReadAll(req.Body)
+	timeoutCtx, cancelEx := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancelEx()
+	req = req.WithContext(timeoutCtx)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Println(err.Error())
+		return exchange, err
+	}
+
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		log.Println(err.Error())
 		return exchange, err
@@ -110,18 +157,30 @@ func fetchExchangeRate(_ context.Context, typeConvertion string) (ExchangeRate, 
 		log.Println(err.Error())
 		return exchange, err
 	}
-	time.Sleep(3 * time.Second)
 	return exchange, nil
 }
 
-// func saveExchangeRate(ctx context.Context, db *sql.DB, exchange ExchangeRate) error {
-// 	query := "INSERT INTO exchange_rates (code, codein, name, high, low, varBid, pctChange, bid, ask, timestamp, create_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-// 	stmt, err := db.PrepareContext(ctx, query)
-// 	if err != nil {
-// 		return err
-// 	}
-// 	defer stmt.Close()
+func saveExchangeRate(ctx context.Context, exchange ExchangeRate) error {
+	db, err := sql.Open("sqlite3", "./currencies.db")
+	if err != nil {
+		return err
+	}
+	defer db.Close()
 
-// 	_, err = stmt.ExecContext(ctx, exchange.Code, exchange.Codein, exchange.Name, exchange.High, exchange.Low, exchange.VarBid, exchange.PctChange, exchange.Bid, exchange.Ask, exchange.Timestamp, exchange.CreateDate)
-// 	return err
-// }
+	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancel()
+
+	query := "INSERT INTO exchange_rates (code, codein, name, high, low, varBid, pctChange, bid, ask, timestamp, create_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+	_, err = db.ExecContext(timeoutCtx, query, exchange.USDBRL.Code, exchange.USDBRL.Codein, exchange.USDBRL.Name, exchange.USDBRL.High, exchange.USDBRL.Low, exchange.USDBRL.VarBid, exchange.USDBRL.PctChange, exchange.USDBRL.Bid, exchange.USDBRL.Ask, exchange.USDBRL.Timestamp, exchange.USDBRL.CreateDate)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeResponse(w http.ResponseWriter, statusCode int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(statusCode)
+	w.Write(body)
+}

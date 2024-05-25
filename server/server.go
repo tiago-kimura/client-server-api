@@ -35,6 +35,13 @@ type Response struct {
 	Bid string `json:"bid"`
 }
 
+func main() {
+	NewDatabase()
+	http.HandleFunc("/cotacao", handler)
+	http.HandleFunc("/cotacoes", handlerGet)
+	log.Fatal(http.ListenAndServe(":8080", nil))
+}
+
 func NewDatabase() {
 	db, err := sql.Open("sqlite3", "./currencies.db")
 	if err != nil {
@@ -60,22 +67,15 @@ func NewDatabase() {
 	}
 }
 
-func main() {
-	NewDatabase()
-	http.HandleFunc("/cotacao", handler)
-	http.HandleFunc("/cotacoes", handlerGet)
-	log.Fatal(http.ListenAndServe(":8080", nil))
-}
-
 func handlerGet(w http.ResponseWriter, r *http.Request) {
 	db, err := sql.Open("sqlite3", "./currencies.db")
 	if err != nil {
-		log.Fatalf("Erro ao abrir banco de dados: %v\n", err)
+		log.Fatalf("Error to open data base: %v\n", err)
 	}
 	defer db.Close()
 	rows, err := db.Query("SELECT * FROM exchange_rates ")
 	if err != nil {
-		log.Fatalf("Erro ao executar a consulta SQL: %v\n", err)
+		log.Fatalf("Error to execute SQL: %v\n", err)
 	}
 	defer rows.Close()
 
@@ -85,58 +85,53 @@ func handlerGet(w http.ResponseWriter, r *http.Request) {
 		err := rows.Scan(&rate.USDBRL.Id, &rate.USDBRL.Code, &rate.USDBRL.Codein, &rate.USDBRL.Name, &rate.USDBRL.High, &rate.USDBRL.Low,
 			&rate.USDBRL.VarBid, &rate.USDBRL.PctChange, &rate.USDBRL.Bid, &rate.USDBRL.Ask, &rate.USDBRL.Timestamp, &rate.USDBRL.CreateDate)
 		if err != nil {
-			log.Fatalf("Erro ao ler linha do resultado: %v\n", err)
+			log.Fatalf("Error read result: %v\n", err)
 		}
 		rates = append(rates, rate)
 	}
 	if err = rows.Err(); err != nil {
-		log.Fatalf("Erro ao iterar sobre as linhas do resultado: %v\n", err)
+		log.Fatalf("Error to iterate result: %v\n", err)
 	}
 	body, _ := json.Marshal(rates)
 	writeResponse(w, http.StatusOK, body)
 }
 
 func handler(w http.ResponseWriter, r *http.Request) {
-	log.Println("Request iniciada")
+	log.Println("Request started")
 	ctx := r.Context()
-	defer log.Println("Request finalizada")
+	defer log.Println("Request finished")
 
-	select {
-	case <-ctx.Done():
-		log.Println("Request cancelada pelo cliente")
-	case <-time.After(1 * time.Second):
-
-		exchange, err := fetchExchangeRate(ctx, "USD-BRL")
-		if err != nil {
-			writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
-			return
-		}
-
-		err = saveExchangeRate(ctx, exchange)
-		if err != nil {
-			writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
-			return
-		}
-
-		var response Response
-		response.Bid = exchange.USDBRL.Bid
-		body, _ := json.Marshal(response)
-		writeResponse(w, http.StatusOK, body)
+	timeoutCtxEx, cancelEx := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancelEx()
+	exchange, err := fetchExchangeRate(timeoutCtxEx, "USD-BRL")
+	if err != nil {
+		writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
+		return
 	}
+
+	timeoutCtxSv, cancelSv := context.WithTimeout(ctx, 10*time.Millisecond)
+	defer cancelSv()
+	err = saveExchangeRate(timeoutCtxSv, exchange)
+	if err != nil {
+		writeResponse(w, http.StatusBadRequest, []byte(err.Error()))
+		return
+	}
+
+	var response Response
+	response.Bid = exchange.USDBRL.Bid
+	body, _ := json.Marshal(response)
+	writeResponse(w, http.StatusOK, body)
+
 }
 
 func fetchExchangeRate(ctx context.Context, typeConversion string) (ExchangeRate, error) {
 	var exchange ExchangeRate
 	client := http.Client{}
-	req, err := http.NewRequest("GET", "https://economia.awesomeapi.com.br/json/last/"+typeConversion, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://economia.awesomeapi.com.br/json/last/"+typeConversion, nil)
 	if err != nil {
 		log.Println(err.Error())
 		return exchange, err
 	}
-
-	timeoutCtx, cancelEx := context.WithTimeout(ctx, 200*time.Millisecond)
-	defer cancelEx()
-	req = req.WithContext(timeoutCtx)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -167,16 +162,14 @@ func saveExchangeRate(ctx context.Context, exchange ExchangeRate) error {
 	}
 	defer db.Close()
 
-	timeoutCtx, cancel := context.WithTimeout(ctx, 10*time.Millisecond)
-	defer cancel()
-
 	query := "INSERT INTO exchange_rates (code, codein, name, high, low, varBid, pctChange, bid, ask, timestamp, create_date) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-	_, err = db.ExecContext(timeoutCtx, query, exchange.USDBRL.Code, exchange.USDBRL.Codein, exchange.USDBRL.Name, exchange.USDBRL.High, exchange.USDBRL.Low, exchange.USDBRL.VarBid, exchange.USDBRL.PctChange, exchange.USDBRL.Bid, exchange.USDBRL.Ask, exchange.USDBRL.Timestamp, exchange.USDBRL.CreateDate)
+
+	_, err = db.ExecContext(ctx, query, exchange.USDBRL.Code, exchange.USDBRL.Codein, exchange.USDBRL.Name, exchange.USDBRL.High, exchange.USDBRL.Low, exchange.USDBRL.VarBid, exchange.USDBRL.PctChange, exchange.USDBRL.Bid, exchange.USDBRL.Ask, exchange.USDBRL.Timestamp, exchange.USDBRL.CreateDate)
 	if err != nil {
 		return err
 	}
-
 	return nil
+
 }
 
 func writeResponse(w http.ResponseWriter, statusCode int, body []byte) {
